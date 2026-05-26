@@ -1,37 +1,110 @@
 (() => {
-  const PANEL_ID = "gradio-ltx-speech-runner-panel";
-  const STORAGE_KEY = "gradioLtxSpeechRunner:v7-clip-quote-parser";
+  const PANEL_ID = "gradio-ltx-global-assets-runner-panel";
+  const STORAGE_KEY = "gradioLtxRunner:v15-global-presets-auto-duration";
+  const DEFAULT_SEED = "2450723370";
+  const DEFAULT_ASPECT_RATIO = "9:16 Portrait";
 
   const state = {
     running: false,
     paused: false,
     stopped: false,
-    currentIndex: 0,
-    selectedFiles: new Map(),
+    currentBatchIndex: 0,
+    currentItemIndex: 0,
+    globalImages: new Map(),
+    batchAudios: new Map(),
+    batchQueue: [],
     logLines: [],
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  function isInsideRunnerPanel(element) {
+  function isInsidePanel(element) {
     return Boolean(element?.closest?.(`#${PANEL_ID}`));
   }
 
   const selectors = {
     promptBox: () =>
       [...document.querySelectorAll('textarea[data-testid="textbox"]')]
-        .filter((el) => !isInsideRunnerPanel(el))
+        .filter((el) => !isInsidePanel(el))
         .find((el) => (el.placeholder || "").includes("[VISUAL]")),
+
+    seedInput: () =>
+      [...document.querySelectorAll('input[type="number"]')]
+        .filter((el) => !isInsidePanel(el))
+        .find((el) => (el.getAttribute("aria-label") || "").includes("Seed")),
+
+    aspectRatioInput: () =>
+      [...document.querySelectorAll('input[role="listbox"], input[aria-label]')]
+        .filter((el) => !isInsidePanel(el))
+        .find((el) =>
+          (el.getAttribute("aria-label") || "").includes("Aspect Ratio"),
+        ),
+
+    durationInput: () => {
+      const direct = document.querySelector(
+        '#component-10 input[role="listbox"][aria-label*="Duration"]',
+      );
+
+      if (direct && !isInsidePanel(direct)) return direct;
+
+      return [
+        ...document.querySelectorAll(
+          'input[role="listbox"], input[aria-label]',
+        ),
+      ]
+        .filter((el) => !isInsidePanel(el))
+        .find((el) => {
+          const label = el.getAttribute("aria-label") || "";
+          return label.includes("Duration") || label.includes("⏱️");
+        });
+    },
+
+    imageBlock: () => {
+      const direct = document.querySelector("#component-6");
+      if (direct && !isInsidePanel(direct)) return direct;
+
+      return [...document.querySelectorAll('[id^="component-"]')]
+        .filter((el) => !isInsidePanel(el))
+        .find((el) => (el.innerText || "").includes("Reference Image"));
+    },
+
+    imageInput: () => {
+      const block = selectors.imageBlock();
+
+      if (block) {
+        const scopedInput = [
+          ...block.querySelectorAll('input[type="file"]'),
+        ].find((input) => (input.accept || "").toLowerCase().includes("image"));
+
+        if (scopedInput) return scopedInput;
+      }
+
+      return [...document.querySelectorAll('input[type="file"]')]
+        .filter((input) => !isInsidePanel(input))
+        .filter((input) => input.id !== "glsr-global-image-files")
+        .find((input) => (input.accept || "").toLowerCase().includes("image"));
+    },
+
+    imageClearButton: () => {
+      const block = selectors.imageBlock();
+      if (!block) return null;
+
+      return (
+        block.querySelector('button[aria-label="Limpar"]') ||
+        block.querySelector('button[title="Limpar"]') ||
+        block.querySelector('button[aria-label="Clear"]') ||
+        block.querySelector('button[title="Clear"]') ||
+        block.querySelector('button[aria-label="Remove"]') ||
+        block.querySelector('button[title="Remove"]')
+      );
+    },
 
     audioBlock: () => {
       const direct = document.querySelector("#component-7");
-
-      if (direct && !isInsideRunnerPanel(direct)) {
-        return direct;
-      }
+      if (direct && !isInsidePanel(direct)) return direct;
 
       return [...document.querySelectorAll('[id^="component-"]')]
-        .filter((el) => !isInsideRunnerPanel(el))
+        .filter((el) => !isInsidePanel(el))
         .find((el) =>
           (el.innerText || "").includes("Upload Speech/Song Audio"),
         );
@@ -45,23 +118,18 @@
           ...block.querySelectorAll('input[type="file"]'),
         ].find((input) => (input.accept || "").toLowerCase().includes("audio"));
 
-        if (scopedInput) {
-          return scopedInput;
-        }
+        if (scopedInput) return scopedInput;
       }
 
       return [...document.querySelectorAll('input[type="file"]')]
-        .filter((input) => !isInsideRunnerPanel(input))
-        .filter((input) => input.id !== "glsr-audio-files")
+        .filter((input) => !isInsidePanel(input))
+        .filter((input) => input.id !== "glsr-batch-audio-files")
         .find((input) => (input.accept || "").toLowerCase().includes("audio"));
     },
 
     audioClearButton: () => {
       const block = selectors.audioBlock();
-
-      if (!block) {
-        return null;
-      }
+      if (!block) return null;
 
       return (
         block.querySelector('button[aria-label="Limpar"]') ||
@@ -74,8 +142,6 @@
     },
 
     generateButton: () => document.querySelector("#gen-btn"),
-    stopButton: () => document.querySelector("#stop-btn"),
-    clearButton: () => document.querySelector("#clear-btn"),
 
     downloadLink: () =>
       document.querySelector(
@@ -95,7 +161,7 @@
           'input[type="checkbox"][data-testid="checkbox"], input[type="checkbox"]',
         ),
       ]
-        .filter((input) => !isInsideRunnerPanel(input))
+        .filter((input) => !isInsidePanel(input))
         .find((input) =>
           (input.closest("label")?.innerText || "").includes(
             "Match video duration",
@@ -103,13 +169,22 @@
         ),
   };
 
-  const exampleBasePrompt = `[VISUAL] A realistic woman talking directly to camera in a cozy mystical room, warm cinematic lighting, natural facial expression, subtle head movement.
-[SPEECH] {{speech}}
-[SOUND] Clear female voice, studio quality, natural pacing, clean microphone, no background noise.`;
+  const exampleSound = `Gentle fast-paced mature female voice with authority. Warm, clear, grounded, and confident. Natural Portuguese pronunciation, direct-to-camera TikTok storytelling energy.`;
 
-  const exampleQueue = `CLIP 1 — "Leão... [sigh] você tem se colocado em último lugar, não tem?"
+  const exampleVisualPrompts = `IMAGE 1 — "Vertical 9:16 realistic cinematic shot of a mature mystical woman seated at a wooden tarot table, black cat on her lap, cozy Brazilian apartment, warm daylight, plants and crystals."
+
+IMAGE 2 — "Vertical 9:16 realistic cinematic shot of the same woman standing near a sunlit window, holding a crystal, plants and spiritual books around her, grounded mystical home atmosphere."
+
+IMAGE 3 — "Vertical 9:16 realistic cinematic close-up of tarot cards, crystals, candles, and the woman's hands resting calmly on the wooden table, warm cinematic realism."`;
+
+  const exampleSpeechQueue = `CLIP 1 — "Leão... [sigh] você tem se colocado em último lugar, não tem?"
 CLIP 2 — "[pause] Chega. [pause] O universo está dizendo isso agora — com força."
-CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais leve, [pause] mais sua."`;
+CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais leve, [pause] mais sua."
+CLIP 4 — "Oportunidades vão chegar — mas lembra... [pause] tá tudo bem não abraçar tudo."
+CLIP 5 — "Tem felicidade esperando por você, leonino. [pause] O único erro... é achar que não merece."
+CLIP 6 — "Acredite, [pause] cuide de você [pause] e exija ser correspondido."
+CLIP 7 — CTA — "Tá fazendo sentido até aqui? [pause] Comenta: [pause] eu mereço ser feliz."
+CLIP 8 — "[sigh] Com essa energia... a virada é real. [pause] Só falta você [pause] se colocar em primeiro lugar."`;
 
   function ensurePanel() {
     let panel = document.getElementById(PANEL_ID);
@@ -117,6 +192,8 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     if (panel) {
       panel.style.display = "block";
       panel.scrollIntoView({ behavior: "smooth", block: "center" });
+      renderBatchQueue();
+      updateFileCounts();
       return panel;
     }
 
@@ -129,7 +206,7 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
           z-index: 2147483647;
           right: 18px;
           top: 18px;
-          width: 430px;
+          width: 540px;
           max-height: calc(100vh - 36px);
           overflow: auto;
           background: #101114;
@@ -140,9 +217,7 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
           font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
 
-        #${PANEL_ID} * {
-          box-sizing: border-box;
-        }
+        #${PANEL_ID} * { box-sizing: border-box; }
 
         #${PANEL_ID} header {
           display: flex;
@@ -154,17 +229,11 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
           position: sticky;
           top: 0;
           background: #101114;
-          z-index: 1;
+          z-index: 3;
         }
 
-        #${PANEL_ID} h2 {
-          font-size: 15px;
-          margin: 0;
-        }
-
-        #${PANEL_ID} .body {
-          padding: 14px;
-        }
+        #${PANEL_ID} h2 { font-size: 15px; margin: 0; }
+        #${PANEL_ID} .body { padding: 14px; }
 
         #${PANEL_ID} label {
           display: block;
@@ -190,7 +259,7 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
 
         #${PANEL_ID} textarea {
           resize: vertical;
-          min-height: 92px;
+          min-height: 80px;
         }
 
         #${PANEL_ID} .small {
@@ -222,22 +291,23 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
           cursor: pointer;
         }
 
-        #${PANEL_ID} button.primary {
+        #${PANEL_ID} button.primary { background: #7c3aed; }
+        #${PANEL_ID} button.danger { background: #dc2626; }
+        #${PANEL_ID} button.good { background: #059669; }
+        #${PANEL_ID} button.warning { background: #b45309; }
+
+        #${PANEL_ID} button.tab {
+          background: #181a20;
+          border: 1px solid rgba(255,255,255,.12);
+        }
+
+        #${PANEL_ID} button.tab.active {
           background: #7c3aed;
+          border-color: #7c3aed;
         }
 
-        #${PANEL_ID} button.danger {
-          background: #dc2626;
-        }
-
-        #${PANEL_ID} button.good {
-          background: #059669;
-        }
-
-        #${PANEL_ID} button:disabled {
-          opacity: .45;
-          cursor: not-allowed;
-        }
+        #${PANEL_ID} .tab-panel { display: none; }
+        #${PANEL_ID} .tab-panel.active { display: block; }
 
         #${PANEL_ID} .status {
           margin-top: 10px;
@@ -253,7 +323,7 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
 
         #${PANEL_ID} .log {
           margin-top: 10px;
-          max-height: 180px;
+          max-height: 190px;
           overflow: auto;
           background: #0b0c0f;
           border: 1px solid rgba(255,255,255,.10);
@@ -277,79 +347,203 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
           font-size: 11px;
           margin-top: 8px;
         }
+
+        #${PANEL_ID} .batch-list {
+          display: grid;
+          gap: 8px;
+          margin-top: 8px;
+        }
+
+        #${PANEL_ID} .batch-card {
+          border: 1px solid rgba(255,255,255,.12);
+          background: #181a20;
+          border-radius: 12px;
+          padding: 10px;
+          font-size: 12px;
+        }
+
+        #${PANEL_ID} .batch-title {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          margin-bottom: 6px;
+        }
+
+        #${PANEL_ID} .batch-meta {
+          color: #a1a1aa;
+          font-size: 11px;
+          line-height: 1.4;
+        }
       </style>
 
       <header>
-        <h2>Gradio LTX Speech Runner</h2>
+        <h2>Gradio LTX Global Image Runner</h2>
         <div class="row">
           <button id="glsr-minimize">Hide</button>
         </div>
       </header>
 
       <div class="body">
-        <div class="small">
-          Fixed <b>[VISUAL]</b> and <b>[SOUND]</b>.
-          Only <b>[SPEECH]</b> changes.
-          Audio is matched by queue index:
-          prompt 1 → audio starting with <b>1.</b>,
-          prompt 2 → audio starting with <b>2.</b>, etc.
-          You can paste lines like <code>CLIP 1 — "speech here"</code>.
-          The extension will use only the text inside quotes.
+        <div class="row">
+          <button id="glsr-tab-inputs" class="tab active">Inputs</button>
+          <button id="glsr-tab-settings" class="tab">Settings</button>
         </div>
 
-        <label>1. Audio files</label>
-        <input id="glsr-audio-files" type="file" accept="audio/*" multiple />
-        <div id="glsr-file-count" class="pill">No audio files selected</div>
-
-        <label>2. Base prompt template</label>
-        <textarea id="glsr-base-prompt" rows="6" placeholder="[VISUAL] ...&#10;[SPEECH] {{speech}}&#10;[SOUND] ..."></textarea>
-        <div class="small">Required placeholder: <code>{{speech}}</code></div>
-
-        <label>3. Speech queue</label>
-        <textarea id="glsr-queue" rows="8" placeholder='CLIP 1 — "First speech..."&#10;CLIP 2 — "Second speech..."&#10;CLIP 3 — "Third speech..."'></textarea>
-        <div class="small">
-          Accepted formats:
-          <br />
-          1. One speech per blank line.
-          <br />
-          2. <code>CLIP 1 — "speech here"</code> lines.
-        </div>
-
-        <div class="grid">
-          <div>
-            <label>Start index</label>
-            <input id="glsr-start-index" type="number" min="1" step="1" value="1" />
+        <div id="glsr-panel-inputs" class="tab-panel active">
+          <div class="small" style="margin-top:10px;">
+            Images and visual prompts are global. Batches only contain speech and optional audio.
+            You can save/load global assets as a local preset folder.
           </div>
-          <div>
-            <label>Timeout minutes</label>
-            <input id="glsr-timeout" type="number" min="5" step="1" value="45" />
+
+          <label>Global preset</label>
+          <input id="glsr-preset-name" type="text" placeholder="Mystic Woman - Tarot Room" />
+          <div class="row" style="margin-top:8px;">
+            <button id="glsr-load-preset-folder" class="good">Load preset folder</button>
+            <button id="glsr-export-preset-json">Export preset.json</button>
           </div>
+          <div class="small">
+            Folder format:
+            <code>preset.json</code> plus local images like <code>images/1.png</code>, <code>images/2.png</code>.
+          </div>
+
+          <label>Global images, used by every batch</label>
+          <input id="glsr-global-image-files" type="file" accept="image/*" multiple />
+          <div id="glsr-global-image-count" class="pill">No image files selected</div>
+
+          <label>Global visual prompts, one per image</label>
+          <textarea id="glsr-global-visual-prompts" rows="8" placeholder='IMAGE 1 — "Visual prompt for image 1..."&#10;&#10;IMAGE 2 — "Visual prompt for image 2..."'></textarea>
+
+          <label>Global fixed sound prompt</label>
+          <textarea id="glsr-global-sound" rows="4"></textarea>
+
+          <hr style="border:0;border-top:1px solid rgba(255,255,255,.10);margin:16px 0;" />
+
+          <label>Batch name</label>
+          <input id="glsr-batch-name" type="text" placeholder="Leo batch, Taurus batch..." />
+
+          <label>Batch speech queue</label>
+          <textarea id="glsr-speech-queue" rows="8" placeholder='CLIP 1 — "Speech..."&#10;CLIP 2 — "Speech..."'></textarea>
+
+          <label>Optional audio files for this batch</label>
+          <input id="glsr-batch-audio-files" type="file" accept="audio/*" multiple />
+          <div id="glsr-batch-audio-count" class="pill">No audio files selected</div>
+          <div class="small">
+            Audio maps by speech number. Missing audio is allowed. If audio is missing, auto duration will set 3s, 5s, or 8s.
+          </div>
+
+          <div class="row" style="margin-top:12px;">
+            <button id="glsr-validate-assets">Validate Global Assets</button>
+            <button id="glsr-validate-current">Validate Batch</button>
+            <button id="glsr-add-batch" class="good">Add speech batch to queue</button>
+            <button id="glsr-clear-batch-form">Clear batch form</button>
+            <button id="glsr-example">Example</button>
+          </div>
+
+          <label>Speech batch queue</label>
+          <div class="row">
+            <button id="glsr-start" class="primary">Start / Continue Queue</button>
+            <button id="glsr-pause">Pause</button>
+            <button id="glsr-stop" class="danger">Stop</button>
+            <button id="glsr-clear-batch-queue" class="warning">Clear Batch Queue</button>
+          </div>
+
+          <div id="glsr-batch-list" class="batch-list"></div>
         </div>
 
-        <label>Options</label>
-        <div class="small">
-          <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
-            <input id="glsr-auto-download" type="checkbox" checked />
-            Auto-download each MP4
-          </label>
+        <div id="glsr-panel-settings" class="tab-panel">
+          <label>Start controls</label>
+          <div class="grid">
+            <div>
+              <label>Start batch</label>
+              <input id="glsr-start-batch-index" type="number" min="1" step="1" value="1" />
+            </div>
+            <div>
+              <label>Start item inside batch</label>
+              <input id="glsr-start-item-index" type="number" min="1" step="1" value="1" />
+            </div>
+          </div>
 
-          <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
-            <input id="glsr-match-audio" type="checkbox" checked />
-            Keep Gradio “match audio duration” checked
-          </label>
+          <label>Timeout minutes</label>
+          <input id="glsr-timeout" type="number" min="5" step="1" value="45" />
 
-          <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
-            <input id="glsr-stop-on-error" type="checkbox" checked />
-            Stop on first error
-          </label>
-        </div>
+          <label>Default generation setup</label>
+          <div class="grid">
+            <div>
+              <label>Default seed</label>
+              <input id="glsr-default-seed" type="number" step="1" value="${DEFAULT_SEED}" />
+            </div>
+            <div>
+              <label>Aspect ratio target</label>
+              <input id="glsr-aspect-target" type="text" value="${DEFAULT_ASPECT_RATIO}" />
+            </div>
+          </div>
 
-        <div class="row" style="margin-top:12px;">
-          <button id="glsr-validate">Validate</button>
-          <button id="glsr-start" class="primary">Start</button>
-          <button id="glsr-pause">Pause</button>
-          <button id="glsr-stop" class="danger">Stop</button>
-          <button id="glsr-example">Example</button>
+          <label>Auto duration from speech</label>
+          <div class="grid">
+            <div>
+              <label>Words per second</label>
+              <input id="glsr-duration-wps" type="number" min="1" max="6" step="0.1" value="2.7" />
+            </div>
+            <div>
+              <label>[pause] seconds</label>
+              <input id="glsr-duration-pause" type="number" min="0" max="3" step="0.1" value="0.7" />
+            </div>
+          </div>
+
+          <div class="grid">
+            <div>
+              <label>[sigh] seconds</label>
+              <input id="glsr-duration-sigh" type="number" min="0" max="3" step="0.1" value="0.5" />
+            </div>
+            <div>
+              <label>Short max estimated sec</label>
+              <input id="glsr-duration-short-max" type="number" min="1" max="10" step="0.1" value="3.7" />
+            </div>
+          </div>
+
+          <div class="grid">
+            <div>
+              <label>Normal max estimated sec</label>
+              <input id="glsr-duration-normal-max" type="number" min="2" max="15" step="0.1" value="6.3" />
+            </div>
+            <div>
+              <label>Durations</label>
+              <input id="glsr-duration-values" type="text" value="3,5,8" />
+            </div>
+          </div>
+
+          <div class="small">
+            <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
+              <input id="glsr-auto-duration" type="checkbox" checked />
+              Auto-set duration before each generation
+            </label>
+
+            <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
+              <input id="glsr-use-default-seed" type="checkbox" checked />
+              Set default seed before the first generation only
+            </label>
+
+            <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
+              <input id="glsr-force-aspect" type="checkbox" checked />
+              Force 9:16 aspect ratio before the first generation only
+            </label>
+
+            <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
+              <input id="glsr-auto-download" type="checkbox" checked />
+              Auto-download each MP4
+            </label>
+
+            <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
+              <input id="glsr-match-audio" type="checkbox" checked />
+              Use match-audio duration only when audio exists
+            </label>
+
+            <label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-weight:500;">
+              <input id="glsr-stop-on-error" type="checkbox" checked />
+              Stop on first real error
+            </label>
+          </div>
         </div>
 
         <div id="glsr-status" class="status">Idle.</div>
@@ -358,8 +552,10 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     `;
 
     document.documentElement.appendChild(panel);
-    bindPanel(panel);
+    bindPanel();
     loadSavedConfig();
+    renderBatchQueue();
+    updateFileCounts();
 
     return panel;
   }
@@ -368,33 +564,74 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     return document.getElementById(id);
   }
 
-  function bindPanel(panel) {
+  function bindPanel() {
     $("glsr-minimize").addEventListener("click", () => {
-      panel.style.display = "none";
+      $(PANEL_ID).style.display = "none";
     });
 
-    $("glsr-audio-files").addEventListener("change", (event) => {
-      if (state.running) {
-        log("Ignored extension audio picker change while running.");
-        return;
-      }
+    $("glsr-tab-inputs").addEventListener("click", () => setTab("inputs"));
+    $("glsr-tab-settings").addEventListener("click", () => setTab("settings"));
 
-      state.selectedFiles.clear();
+    $("glsr-load-preset-folder").addEventListener("click", () =>
+      loadPresetFolder().catch((error) => {
+        setStatus(`Preset load error: ${error.message}`);
+        log(`Preset load error: ${error.stack || error.message}`);
+      }),
+    );
+
+    $("glsr-export-preset-json").addEventListener("click", () =>
+      exportCurrentPresetJson().catch((error) => {
+        setStatus(`Preset export error: ${error.message}`);
+        log(`Preset export error: ${error.stack || error.message}`);
+      }),
+    );
+
+    $("glsr-global-image-files").addEventListener("change", (event) => {
+      state.globalImages.clear();
 
       for (const file of event.target.files || []) {
-        state.selectedFiles.set(file.name, file);
+        state.globalImages.set(file.name, file);
       }
 
-      updateFileCount();
-      log(`Selected ${state.selectedFiles.size} audio file(s).`);
-      logSelectedAudioMapping();
+      updateFileCounts();
+      log(`Selected ${state.globalImages.size} global image file(s).`);
+      logGlobalImageMapping();
+    });
+
+    $("glsr-batch-audio-files").addEventListener("change", (event) => {
+      state.batchAudios.clear();
+
+      for (const file of event.target.files || []) {
+        state.batchAudios.set(file.name, file);
+      }
+
+      updateFileCounts();
+      log(
+        `Selected ${state.batchAudios.size} optional audio file(s) for current batch.`,
+      );
+      logAudioMapping(state.batchAudios);
     });
 
     for (const id of [
-      "glsr-base-prompt",
-      "glsr-queue",
-      "glsr-start-index",
+      "glsr-preset-name",
+      "glsr-global-visual-prompts",
+      "glsr-global-sound",
+      "glsr-batch-name",
+      "glsr-speech-queue",
+      "glsr-start-batch-index",
+      "glsr-start-item-index",
       "glsr-timeout",
+      "glsr-default-seed",
+      "glsr-aspect-target",
+      "glsr-auto-duration",
+      "glsr-duration-wps",
+      "glsr-duration-pause",
+      "glsr-duration-sigh",
+      "glsr-duration-short-max",
+      "glsr-duration-normal-max",
+      "glsr-duration-values",
+      "glsr-use-default-seed",
+      "glsr-force-aspect",
       "glsr-auto-download",
       "glsr-match-audio",
       "glsr-stop-on-error",
@@ -403,24 +640,85 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
       $(id).addEventListener("change", saveConfig);
     }
 
-    $("glsr-validate").addEventListener("click", () => {
+    $("glsr-validate-assets").addEventListener("click", () => {
       try {
-        const config = getConfig();
-        const items = parseQueue(config.queueText);
+        const assets = getGlobalAssets();
+        validateGlobalAssets(assets);
+        setStatus(
+          `Global assets valid: ${assets.images.size} image(s), ${assets.visualPrompts.length} visual prompt(s).`,
+        );
+        logGlobalAssetCoverage(assets);
+      } catch (error) {
+        setStatus(`Global asset error: ${error.message}`);
+        log(`Global asset error: ${error.message}`);
+      }
+    });
 
-        validateConfig(config, items);
+    $("glsr-validate-current").addEventListener("click", () => {
+      try {
+        const assets = getGlobalAssets();
+        validateGlobalAssets(assets);
 
-        setStatus(`Valid queue: ${items.length} item(s).`);
-        log(`Validation passed: ${items.length} item(s).`);
-        logParsedQueuePreview(items);
+        const draft = buildBatchDraftFromForm();
+        validateBatchDraft(draft);
+
+        setStatus(
+          `Batch is valid: ${draft.items.length} speech item(s), ${draft.audios.size} optional audio file(s).`,
+        );
+
+        logBatchCoverage(assets, draft);
       } catch (error) {
         setStatus(`Validation error: ${error.message}`);
         log(`Validation error: ${error.message}`);
       }
     });
 
+    $("glsr-add-batch").addEventListener("click", () => {
+      try {
+        const draft = buildBatchDraftFromForm();
+        validateBatchDraft(draft);
+
+        const batch = {
+          id: createId(),
+          name: draft.name || `Speech Batch ${state.batchQueue.length + 1}`,
+          speechText: draft.speechText,
+          items: draft.items,
+          audios: new Map(draft.audios),
+          addedAt: new Date().toISOString(),
+        };
+
+        state.batchQueue.push(batch);
+        renderBatchQueue();
+
+        setStatus(`Added "${batch.name}" to speech batch queue.`);
+        log(
+          `Added speech batch: ${batch.name} | ${batch.items.length} item(s).`,
+        );
+      } catch (error) {
+        setStatus(`Could not add batch: ${error.message}`);
+        log(`Could not add batch: ${error.message}`);
+      }
+    });
+
+    $("glsr-clear-batch-form").addEventListener("click", () => {
+      clearBatchForm();
+      setStatus("Batch form cleared. Global images/prompts were kept.");
+    });
+
+    $("glsr-clear-batch-queue").addEventListener("click", () => {
+      if (state.running) {
+        setStatus("Cannot clear the batch queue while running.");
+        return;
+      }
+
+      state.batchQueue = [];
+      renderBatchQueue();
+      setStatus("Batch queue cleared.");
+      log("Batch queue cleared.");
+    });
+
     $("glsr-start").addEventListener("click", () =>
-      runQueue().catch((error) => {
+      runBatchQueue().catch((error) => {
         state.running = false;
         setStatus(`Stopped with error: ${error.message}`);
         log(`Fatal: ${error.stack || error.message}`);
@@ -447,12 +745,346 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     $("glsr-example").addEventListener("click", loadExample);
   }
 
-  function loadExample() {
-    ensurePanel();
-    $("glsr-base-prompt").value = exampleBasePrompt;
-    $("glsr-queue").value = exampleQueue;
+  function setTab(tab) {
+    const isInputs = tab === "inputs";
+
+    $("glsr-tab-inputs").classList.toggle("active", isInputs);
+    $("glsr-tab-settings").classList.toggle("active", !isInputs);
+    $("glsr-panel-inputs").classList.toggle("active", isInputs);
+    $("glsr-panel-settings").classList.toggle("active", !isInputs);
+  }
+
+  async function loadPresetFolder() {
+    if (!window.showDirectoryPicker) {
+      throw new Error(
+        "Your browser does not support folder picker. Use Chrome/Edge on HTTPS.",
+      );
+    }
+
+    const dirHandle = await window.showDirectoryPicker({
+      mode: "read",
+    });
+
+    const presetHandle = await getFileHandleByPath(dirHandle, "preset.json");
+    if (!presetHandle) {
+      throw new Error("preset.json not found in selected folder.");
+    }
+
+    const presetFile = await presetHandle.getFile();
+    const presetText = await presetFile.text();
+    const preset = JSON.parse(presetText);
+
+    validatePresetJson(preset);
+
+    const visualPrompts = [];
+    const imageFiles = new Map();
+
+    for (const imageConfig of preset.images) {
+      const slot = Number(imageConfig.slot);
+      const filePath = imageConfig.file;
+
+      const imageHandle = await getFileHandleByPath(dirHandle, filePath);
+      if (!imageHandle) {
+        throw new Error(`Image file not found: ${filePath}`);
+      }
+
+      const originalFile = await imageHandle.getFile();
+      const numberedName = ensureNumberedFileName(slot, originalFile.name);
+      const file = new File([originalFile], numberedName, {
+        type: originalFile.type || inferImageMimeType(originalFile.name),
+        lastModified: originalFile.lastModified || Date.now(),
+      });
+
+      imageFiles.set(file.name, file);
+      visualPrompts[slot - 1] = imageConfig.visualPrompt || "";
+    }
+
+    state.globalImages = imageFiles;
+
+    $("glsr-preset-name").value = preset.name || "";
+    $("glsr-global-visual-prompts").value = visualPrompts
+      .map((prompt, index) => `IMAGE ${index + 1} — "${prompt || ""}"`)
+      .join("\n\n");
+    $("glsr-global-sound").value = preset.soundPrompt || "";
+
+    updateFileCounts();
+    await saveConfig();
+
+    setStatus(`Loaded preset folder: ${preset.name || "Unnamed preset"}`);
+    log(`Loaded preset folder with ${state.globalImages.size} image(s).`);
+    logGlobalImageMapping();
+  }
+
+  async function getFileHandleByPath(dirHandle, path) {
+    const parts = String(path || "")
+      .replaceAll("\\", "/")
+      .split("/")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    if (!parts.length) return null;
+
+    let current = dirHandle;
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const isLast = i === parts.length - 1;
+
+      try {
+        if (isLast) {
+          return await current.getFileHandle(part);
+        }
+
+        current = await current.getDirectoryHandle(part);
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  function validatePresetJson(preset) {
+    if (!preset || typeof preset !== "object") {
+      throw new Error("Invalid preset.json.");
+    }
+
+    if (!Array.isArray(preset.images) || !preset.images.length) {
+      throw new Error("preset.json must contain images array.");
+    }
+
+    for (const image of preset.images) {
+      if (!image.slot) {
+        throw new Error("Each preset image must have a slot.");
+      }
+
+      if (!image.file) {
+        throw new Error(
+          `Preset image slot ${image.slot} is missing file path.`,
+        );
+      }
+
+      if (!image.visualPrompt) {
+        throw new Error(
+          `Preset image slot ${image.slot} is missing visualPrompt.`,
+        );
+      }
+    }
+
+    if (!preset.soundPrompt) {
+      throw new Error("preset.json is missing soundPrompt.");
+    }
+  }
+
+  async function exportCurrentPresetJson() {
+    const assets = getGlobalAssets();
+
+    if (!assets.images.size) {
+      throw new Error("Select global images before exporting a preset.");
+    }
+
+    if (!assets.visualPrompts.length) {
+      throw new Error("Add visual prompts before exporting a preset.");
+    }
+
+    if (assets.visualPrompts.length < assets.images.size) {
+      throw new Error(
+        "Add one visual prompt per selected image before exporting.",
+      );
+    }
+
+    if (!assets.soundPrompt) {
+      throw new Error("Add a global sound prompt before exporting.");
+    }
+
+    const presetName =
+      ($("glsr-preset-name").value || "").trim() ||
+      `Global Preset ${new Date().toISOString().slice(0, 10)}`;
+
+    const sortedImages = getSortedFilesBySlot(assets.images);
+
+    const preset = {
+      name: presetName,
+      version: 1,
+      createdAt: new Date().toISOString(),
+      soundPrompt: assets.soundPrompt,
+      images: sortedImages.map((file, index) => ({
+        slot: index + 1,
+        file: `images/${file.name.replace(/^\d+[.\s_-]+/, `${index + 1}.`)}`,
+        visualPrompt: assets.visualPrompts[index] || "",
+      })),
+    };
+
+    const jsonText = JSON.stringify(preset, null, 2);
+    const blob = new Blob([jsonText], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "preset.json";
+    document.documentElement.appendChild(a);
+    a.click();
+    a.remove();
+
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+    setStatus(
+      "Exported preset.json. Put it beside an images/ folder containing the image files.",
+    );
+    log("Exported preset.json.");
+  }
+
+  function ensureNumberedFileName(slot, originalName) {
+    const cleanName = String(originalName || `image-${slot}.png`).replace(
+      /^(\d+)([.\s_-]+)/,
+      "",
+    );
+    return `${slot}.${cleanName}`;
+  }
+
+  function inferImageMimeType(fileName) {
+    const lower = String(fileName || "").toLowerCase();
+
+    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+    if (lower.endsWith(".webp")) return "image/webp";
+    if (lower.endsWith(".gif")) return "image/gif";
+
+    return "image/png";
+  }
+
+  function getGlobalAssets() {
+    const visualText = ($("glsr-global-visual-prompts").value || "").trim();
+    const soundPrompt = ($("glsr-global-sound").value || "").trim();
+
+    return {
+      images: new Map(state.globalImages),
+      visualPrompts: parsePromptList(visualText),
+      soundPrompt,
+    };
+  }
+
+  function buildBatchDraftFromForm() {
+    const name = ($("glsr-batch-name").value || "").trim();
+    const speechText = ($("glsr-speech-queue").value || "").trim();
+    const items = parsePromptList(speechText);
+
+    return {
+      name,
+      speechText,
+      items: items.map((speech, index) => ({ index, speech })),
+      audios: new Map(state.batchAudios),
+    };
+  }
+
+  function validateGlobalAssets(assets) {
+    if (!assets.images.size) {
+      throw new Error("Select at least one global image.");
+    }
+
+    if (!assets.visualPrompts.length) {
+      throw new Error("Add at least one visual prompt.");
+    }
+
+    if (assets.visualPrompts.length < assets.images.size) {
+      throw new Error(
+        `You selected ${assets.images.size} image(s), but only ${assets.visualPrompts.length} visual prompt(s). Add one visual prompt per image.`,
+      );
+    }
+
+    if (!assets.soundPrompt) {
+      throw new Error("Global fixed sound prompt is empty.");
+    }
+
+    if (!selectors.promptBox()) {
+      throw new Error("Could not find Gradio prompt textarea.");
+    }
+
+    if (!selectors.imageBlock()) {
+      throw new Error("Could not find Gradio image block (#component-6).");
+    }
+
+    if (!selectors.audioBlock()) {
+      throw new Error("Could not find Gradio audio block (#component-7).");
+    }
+
+    if (!selectors.generateButton()) {
+      throw new Error("Could not find Gradio Generate button (#gen-btn).");
+    }
+  }
+
+  function validateBatchDraft(draft) {
+    if (!draft.items.length) {
+      throw new Error("Batch speech queue is empty.");
+    }
+  }
+
+  function renderBatchQueue() {
+    const list = $("glsr-batch-list");
+    if (!list) return;
+
+    if (!state.batchQueue.length) {
+      list.innerHTML = `<div class="small">No speech batches added yet.</div>`;
+      return;
+    }
+
+    list.innerHTML = state.batchQueue
+      .map((batch, index) => {
+        const noAudioCount = batch.items.filter(
+          (item) => !findNumberedFile(item.index + 1, batch.audios),
+        ).length;
+
+        return `
+          <div class="batch-card" data-batch-id="${escapeHtml(batch.id)}">
+            <div class="batch-title">
+              <strong>${index + 1}. ${escapeHtml(batch.name)}</strong>
+              <button data-remove-batch="${escapeHtml(batch.id)}" class="danger">Remove</button>
+            </div>
+            <div class="batch-meta">
+              ${batch.items.length} speech item(s) · ${batch.audios.size} optional audio(s)
+              <br />
+              No-audio items: ${noAudioCount}
+              <br />
+              First speech: ${escapeHtml(truncate(batch.items[0]?.speech || "", 90))}
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+
+    for (const button of list.querySelectorAll("[data-remove-batch]")) {
+      button.addEventListener("click", () => {
+        if (state.running) {
+          setStatus("Cannot remove a batch while running.");
+          return;
+        }
+
+        const id = button.getAttribute("data-remove-batch");
+        state.batchQueue = state.batchQueue.filter((batch) => batch.id !== id);
+        renderBatchQueue();
+        setStatus("Batch removed.");
+      });
+    }
+  }
+
+  function clearBatchForm() {
+    $("glsr-batch-name").value = "";
+    $("glsr-speech-queue").value = "";
+    $("glsr-batch-audio-files").value = "";
+    state.batchAudios.clear();
+    updateFileCounts();
     saveConfig();
-    setStatus("Example loaded. Select files named like 1.wav, 2.wav, 3.wav.");
+  }
+
+  function loadExample() {
+    $("glsr-preset-name").value = "Example Mystic Woman Preset";
+    $("glsr-global-visual-prompts").value = exampleVisualPrompts;
+    $("glsr-global-sound").value = exampleSound;
+    $("glsr-batch-name").value = "Example Leo speech batch";
+    $("glsr-speech-queue").value = exampleSpeechQueue;
+    saveConfig();
+    setStatus(
+      "Example loaded. Select global images, optional numbered audio files, then add speech batch.",
+    );
   }
 
   async function saveConfig() {
@@ -464,12 +1096,33 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     const saved = await chrome.storage.local.get(STORAGE_KEY);
     const config = saved[STORAGE_KEY];
 
-    if (!config) return;
+    if (!config) {
+      $("glsr-default-seed").value = DEFAULT_SEED;
+      $("glsr-aspect-target").value = DEFAULT_ASPECT_RATIO;
+      return;
+    }
 
-    $("glsr-base-prompt").value = config.basePrompt || "";
-    $("glsr-queue").value = config.queueText || "";
-    $("glsr-start-index").value = config.startIndex || 1;
+    $("glsr-preset-name").value = config.presetName || "";
+    $("glsr-global-visual-prompts").value = config.globalVisualPrompts || "";
+    $("glsr-global-sound").value = config.globalSound || "";
+    $("glsr-batch-name").value = config.batchName || "";
+    $("glsr-speech-queue").value = config.speechText || "";
+    $("glsr-start-batch-index").value = config.startBatchIndex || 1;
+    $("glsr-start-item-index").value = config.startItemIndex || 1;
     $("glsr-timeout").value = config.timeoutMinutes || 45;
+    $("glsr-default-seed").value = config.defaultSeed || DEFAULT_SEED;
+    $("glsr-aspect-target").value = config.aspectTarget || DEFAULT_ASPECT_RATIO;
+
+    $("glsr-auto-duration").checked = config.autoDuration !== false;
+    $("glsr-duration-wps").value = config.durationWordsPerSecond || 2.7;
+    $("glsr-duration-pause").value = config.durationPauseSeconds || 0.7;
+    $("glsr-duration-sigh").value = config.durationSighSeconds || 0.5;
+    $("glsr-duration-short-max").value = config.durationShortMax || 3.7;
+    $("glsr-duration-normal-max").value = config.durationNormalMax || 6.3;
+    $("glsr-duration-values").value = config.durationValues || "3,5,8";
+
+    $("glsr-use-default-seed").checked = config.useDefaultSeed !== false;
+    $("glsr-force-aspect").checked = config.forceAspect !== false;
     $("glsr-auto-download").checked = config.autoDownload !== false;
     $("glsr-match-audio").checked = config.matchAudio !== false;
     $("glsr-stop-on-error").checked = config.stopOnError !== false;
@@ -479,22 +1132,59 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     const val = (id) => (trim ? ($(id).value || "").trim() : $(id).value || "");
 
     return {
-      basePrompt: val("glsr-base-prompt"),
-      queueText: val("glsr-queue"),
-      startIndex: Math.max(1, parseInt($("glsr-start-index").value || "1", 10)),
+      presetName: val("glsr-preset-name"),
+      globalVisualPrompts: val("glsr-global-visual-prompts"),
+      globalSound: val("glsr-global-sound"),
+      batchName: val("glsr-batch-name"),
+      speechText: val("glsr-speech-queue"),
+      startBatchIndex: Math.max(
+        1,
+        parseInt($("glsr-start-batch-index").value || "1", 10),
+      ),
+      startItemIndex: Math.max(
+        1,
+        parseInt($("glsr-start-item-index").value || "1", 10),
+      ),
       timeoutMinutes: Math.max(
         5,
         parseInt($("glsr-timeout").value || "45", 10),
       ),
+      defaultSeed: val("glsr-default-seed") || DEFAULT_SEED,
+      aspectTarget: val("glsr-aspect-target") || DEFAULT_ASPECT_RATIO,
+
+      autoDuration: $("glsr-auto-duration").checked,
+      durationWordsPerSecond: Math.max(
+        1,
+        parseFloat($("glsr-duration-wps").value || "2.7"),
+      ),
+      durationPauseSeconds: Math.max(
+        0,
+        parseFloat($("glsr-duration-pause").value || "0.7"),
+      ),
+      durationSighSeconds: Math.max(
+        0,
+        parseFloat($("glsr-duration-sigh").value || "0.5"),
+      ),
+      durationShortMax: Math.max(
+        1,
+        parseFloat($("glsr-duration-short-max").value || "3.7"),
+      ),
+      durationNormalMax: Math.max(
+        2,
+        parseFloat($("glsr-duration-normal-max").value || "6.3"),
+      ),
+      durationValues: val("glsr-duration-values") || "3,5,8",
+
+      useDefaultSeed: $("glsr-use-default-seed").checked,
+      forceAspect: $("glsr-force-aspect").checked,
       autoDownload: $("glsr-auto-download").checked,
       matchAudio: $("glsr-match-audio").checked,
       stopOnError: $("glsr-stop-on-error").checked,
     };
   }
 
-  function parseQueue(text) {
+  function parsePromptList(text) {
     const raw = (text || "").trim();
-
     if (!raw) return [];
 
     const nonEmptyLines = raw
@@ -503,63 +1193,24 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
       .filter(Boolean);
 
     const quotedItems = nonEmptyLines
-      .map((line) => extractQuotedSpeech(line))
+      .map((line) => extractQuotedText(line))
       .filter(Boolean);
 
     if (
       quotedItems.length >= 2 ||
       quotedItems.length === nonEmptyLines.length
     ) {
-      return quotedItems.map((speech, index) => {
-        if (!speech.trim()) {
-          throw new Error(`Item ${index + 1} has empty speech text`);
-        }
-
-        return {
-          index,
-          speech: speech.trim(),
-        };
-      });
+      return quotedItems.map((item) => item.trim()).filter(Boolean);
     }
 
-    const blocks = raw
+    return raw
       .split(/\n\s*\n/g)
-      .map((block) => block.trim())
+      .map((block) => (extractQuotedText(block) || block).trim())
       .filter(Boolean);
-
-    return blocks.map((block, index) => {
-      let speech = block;
-
-      const quotedSpeech = extractQuotedSpeech(block);
-      if (quotedSpeech) {
-        speech = quotedSpeech;
-      } else {
-        const speechMatch = block.match(/^speech\s*:\s*([\s\S]+)$/im);
-
-        if (speechMatch) {
-          speech = speechMatch[1].trim();
-        }
-      }
-
-      speech = speech
-        .replace(/^audio\s*:\s*.+$/gim, "")
-        .replace(/^speech\s*:\s*/im, "")
-        .trim();
-
-      if (!speech) {
-        throw new Error(`Item ${index + 1} has empty speech text`);
-      }
-
-      return {
-        index,
-        speech,
-      };
-    });
   }
 
-  function extractQuotedSpeech(text) {
+  function extractQuotedText(text) {
     const value = String(text || "").trim();
-
     if (!value) return "";
 
     const quotePairs = [
@@ -581,113 +1232,102 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     return "";
   }
 
-  function logParsedQueuePreview(items) {
-    log("Parsed speech queue:");
-    for (const item of items) {
-      log(`  ${item.index + 1} → ${truncate(item.speech, 90)}`);
-    }
-  }
-
-  function validateConfig(config, items) {
-    if (!config.basePrompt.includes("{{speech}}")) {
-      throw new Error("Base prompt must contain {{speech}}");
-    }
-
-    if (!items.length) {
-      throw new Error("Queue is empty");
-    }
-
-    const missing = [];
-
-    for (const item of items) {
-      const number = item.index + 1;
-      const file = findAudioFileForNumber(number);
-
-      if (!file) {
-        missing.push(`${number}.`);
-      }
-    }
-
-    if (missing.length) {
-      throw new Error(
-        `Missing selected audio file(s) starting with: ${[
-          ...new Set(missing),
-        ].join(", ")}`,
-      );
-    }
-
-    if (!selectors.promptBox()) {
-      throw new Error("Could not find Gradio prompt textarea");
-    }
-
-    const block = selectors.audioBlock();
-
-    if (!block) {
-      throw new Error("Could not find Gradio audio block (#component-7)");
-    }
-
-    if (!selectors.generateButton()) {
-      throw new Error("Could not find Gradio Generate button (#gen-btn)");
-    }
-  }
-
-  function buildPrompt(basePrompt, speech) {
-    return basePrompt.replaceAll("{{speech}}", speech);
-  }
-
-  function findAudioFileForNumber(number) {
-    const files = [...state.selectedFiles.values()];
-
-    const exactPrefixRegex = new RegExp(
-      `^${escapeRegExp(String(number))}(?:[.\\s_-]|$)`,
-      "i",
-    );
-
-    return files.find((file) => exactPrefixRegex.test(file.name)) || null;
-  }
-
-  async function runQueue() {
+  async function runBatchQueue() {
     ensurePanel();
 
     if (state.running) {
-      setStatus("Already running.");
+      setStatus(
+        "Already running. You can still add speech batches from Inputs.",
+      );
       return;
     }
 
-    const config = getConfig();
-    const items = parseQueue(config.queueText);
+    if (!state.batchQueue.length) {
+      setStatus(
+        "Speech batch queue is empty. Add at least one speech batch first.",
+      );
+      return;
+    }
 
-    validateConfig(config, items);
-    await saveConfig();
+    const assets = getGlobalAssets();
+    validateGlobalAssets(assets);
+
+    const config = getConfig();
 
     state.running = true;
     state.paused = false;
     state.stopped = false;
-    state.currentIndex = config.startIndex - 1;
+    state.currentBatchIndex = config.startBatchIndex - 1;
+    state.currentItemIndex = config.startItemIndex - 1;
 
     $("glsr-pause").textContent = "Pause";
 
-    log(`Starting from item ${state.currentIndex + 1}/${items.length}.`);
-    logSelectedAudioMapping();
-    logParsedQueuePreview(items);
+    log(
+      `Starting queue from batch ${state.currentBatchIndex + 1}, item ${state.currentItemIndex + 1}.`,
+    );
 
-    for (let i = state.currentIndex; i < items.length; i++) {
-      state.currentIndex = i;
+    await applyInitialGenerationSettings(config);
 
-      if (state.stopped) break;
+    let batchIndex = state.currentBatchIndex;
 
-      await waitWhilePaused();
-
-      const item = items[i];
-
-      try {
-        await runOneItem(item, i, items.length, config);
-      } catch (error) {
-        log(`Item ${i + 1} failed: ${error.message}`);
-        setStatus(`Item ${i + 1} failed: ${error.message}`);
-
-        if (config.stopOnError) break;
+    while (!state.stopped) {
+      if (batchIndex >= state.batchQueue.length) {
+        break;
       }
+
+      const batch = state.batchQueue[batchIndex];
+      const startItem =
+        batchIndex === state.currentBatchIndex ? state.currentItemIndex : 0;
+
+      log(
+        `Starting speech batch ${batchIndex + 1}/${state.batchQueue.length}: ${batch.name}`,
+      );
+
+      setStatus(
+        `Starting speech batch ${batchIndex + 1}/${state.batchQueue.length}: ${batch.name}`,
+      );
+
+      for (
+        let itemIndex = startItem;
+        itemIndex < batch.items.length;
+        itemIndex++
+      ) {
+        if (state.stopped) break;
+
+        state.currentBatchIndex = batchIndex;
+        state.currentItemIndex = itemIndex;
+
+        await waitWhilePaused();
+
+        try {
+          const freshAssets = getGlobalAssets();
+          validateGlobalAssets(freshAssets);
+
+          await runOneItem({
+            assets: freshAssets,
+            batch,
+            batchIndex,
+            item: batch.items[itemIndex],
+            itemIndex,
+            config,
+          });
+        } catch (error) {
+          log(
+            `Batch ${batchIndex + 1}, item ${itemIndex + 1} failed: ${error.message}`,
+          );
+
+          setStatus(
+            `Batch ${batchIndex + 1}, item ${itemIndex + 1} failed: ${error.message}`,
+          );
+
+          if (config.stopOnError) {
+            state.running = false;
+            return;
+          }
+        }
+      }
+
+      batchIndex += 1;
     }
 
     state.running = false;
@@ -697,48 +1337,123 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
       setStatus("Stopped.");
       log("Stopped by user.");
     } else {
-      setStatus("Done.");
-      log("Queue finished.");
+      setStatus("Done. No more speech batches in the queue.");
+      log("Queue finished. No more speech batches found.");
     }
   }
 
-  async function runOneItem(item, zeroIndex, total, config) {
-    const displayIndex = zeroIndex + 1;
-    const audioFile = findAudioFileForNumber(displayIndex);
+  async function applyInitialGenerationSettings(config) {
+    setStatus("Applying initial generation settings...");
 
-    if (!audioFile) {
-      logSelectedAudioMapping();
-      throw new Error(`Missing audio file starting with "${displayIndex}."`);
+    if (config.useDefaultSeed) {
+      await setSeedValue(config.defaultSeed || DEFAULT_SEED);
+    } else {
+      log("Default seed disabled. Seed input was not touched.");
     }
 
-    setStatus(`Item ${displayIndex}/${total}: preparing ${audioFile.name}`);
+    if (config.forceAspect) {
+      await setAspectRatio(config.aspectTarget || DEFAULT_ASPECT_RATIO);
+    } else {
+      log("Force aspect ratio disabled. Aspect ratio input was not touched.");
+    }
 
-    log(
-      `Item ${displayIndex}: speech=${truncate(
-        item.speech,
-        70,
-      )} | audio=${audioFile.name}`,
+    await sleep(800);
+  }
+
+  async function runOneItem({
+    assets,
+    batch,
+    batchIndex,
+    item,
+    itemIndex,
+    config,
+  }) {
+    const displayBatchIndex = batchIndex + 1;
+    const displayItemIndex = itemIndex + 1;
+
+    const imageSlot = getImageSlotForItemIndex(itemIndex, assets.images.size);
+    const imageFile = findImageFileForSlot(imageSlot, assets.images);
+    const visualPrompt = assets.visualPrompts[imageSlot - 1];
+
+    const audioFile = findNumberedFile(displayItemIndex, batch.audios);
+    const hasAudio = Boolean(audioFile);
+
+    if (!imageFile) {
+      throw new Error(`Missing global image slot ${imageSlot}.`);
+    }
+
+    if (!visualPrompt) {
+      throw new Error(
+        `Missing visual prompt for global image slot ${imageSlot}.`,
+      );
+    }
+
+    const finalPrompt = buildPrompt({
+      visual: visualPrompt,
+      speech: item.speech,
+      sound: assets.soundPrompt,
+    });
+
+    setStatus(
+      `Batch ${displayBatchIndex}: ${batch.name}\nItem ${displayItemIndex}/${batch.items.length}: global image ${imageSlot}, ${
+        hasAudio ? audioFile.name : "no audio"
+      }`,
     );
 
-    const prompt = buildPrompt(config.basePrompt, item.speech);
-    setPrompt(prompt);
+    log(
+      `Batch ${displayBatchIndex}, item ${displayItemIndex}: globalImage=${imageFile.name}, imageSlot=${imageSlot}, audio=${
+        hasAudio ? audioFile.name : "NO AUDIO"
+      }`,
+    );
 
-    if (config.matchAudio) {
-      setMatchAudioChecked(true);
-    }
+    setPrompt(finalPrompt);
+
+    await clearGradioImageInput();
+    await uploadImageFile(imageFile);
+
+    setStatus(
+      `Batch ${displayBatchIndex}: ${batch.name}\nItem ${displayItemIndex}: waiting for global image ${imageSlot} to load...`,
+    );
+
+    await waitForImageToBeReady(imageFile.name, 30000);
 
     await clearGradioAudioInput();
-    await uploadAudioFile(audioFile);
 
-    setStatus(`Item ${displayIndex}/${total}: waiting for audio to load...`);
-    await waitForAudioToBeReady(audioFile.name, 45000);
+    if (hasAudio) {
+      if (config.matchAudio) {
+        setMatchAudioChecked(true);
+      }
+
+      await uploadAudioFile(audioFile);
+
+      setStatus(
+        `Batch ${displayBatchIndex}: ${batch.name}\nItem ${displayItemIndex}: waiting for audio to load...`,
+      );
+
+      await waitForAudioToBeReady(audioFile.name, 45000);
+    } else {
+      setMatchAudioChecked(false);
+      log(
+        `No audio file starting with "${displayItemIndex}." found. Continuing without audio.`,
+      );
+      await waitForGenerateButtonReady(15000);
+    }
+
+    await maybeSetAutoDuration({
+      speech: item.speech,
+      hasAudio,
+      config,
+    });
 
     const oldHref = getCurrentOutputHref();
     const oldVideoSrc = selectors.outputVideo()?.src || "";
 
     await waitWhilePaused();
 
-    setStatus(`Item ${displayIndex}/${total}: generating...`);
+    setStatus(
+      `Batch ${displayBatchIndex}: ${batch.name}\nItem ${displayItemIndex}: generating...`,
+    );
+
     await clickGenerateButton();
 
     const output = await waitForNewOutput({
@@ -747,11 +1462,18 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
       timeoutMs: config.timeoutMinutes * 60 * 1000,
     });
 
-    setStatus(`Item ${displayIndex}/${total}: generated. Downloading...`);
-    log(`New output: ${output.href}`);
+    setStatus(
+      `Batch ${displayBatchIndex}: ${batch.name}\nItem ${displayItemIndex}: generated. Downloading...`,
+    );
 
     if (config.autoDownload) {
-      const filename = makeFilename(displayIndex, audioFile.name);
+      const filename = makeFilename({
+        batchIndex: displayBatchIndex,
+        batchName: batch.name,
+        itemIndex: displayItemIndex,
+        imageSlot,
+        audioName: hasAudio ? audioFile.name : `no-audio-${displayItemIndex}`,
+      });
 
       const response = await chrome.runtime.sendMessage({
         type: "GRADIO_LTX_DOWNLOAD",
@@ -772,8 +1494,287 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
 
     await clearGradioAudioInput();
 
-    setStatus(`Item ${displayIndex}/${total}: complete.`);
+    setStatus(
+      `Batch ${displayBatchIndex}: ${batch.name}\nItem ${displayItemIndex}: complete.`,
+    );
+
     await sleep(1000);
+  }
+
+  async function maybeSetAutoDuration({ speech, hasAudio, config }) {
+    if (!config.autoDuration) {
+      log("Auto duration disabled. Duration was not touched.");
+      return;
+    }
+
+    if (hasAudio && config.matchAudio) {
+      log(
+        "Audio exists and match-audio is enabled. Duration is ignored by Gradio, so duration was not touched.",
+      );
+      return;
+    }
+
+    const result = chooseDurationFromSpeech(speech, config);
+    await setDurationValue(result.duration);
+
+    log(
+      `Auto duration set to ${result.duration}s. Estimated speech=${result.estimatedSeconds.toFixed(
+        2,
+      )}s, words=${result.wordCount}, pauses=${result.pauseCount}, sighs=${result.sighCount}.`,
+    );
+  }
+
+  function chooseDurationFromSpeech(speech, config) {
+    const values = parseDurationValues(config.durationValues);
+    const shortDuration = values[0] || 3;
+    const normalDuration = values[1] || 5;
+    const longDuration = values[2] || 8;
+
+    const text = String(speech || "");
+    const pauseCount = (text.match(/\[pause\]/gi) || []).length;
+    const sighCount = (text.match(/\[sigh\]/gi) || []).length;
+
+    const cleanText = text
+      .replace(/\[[^\]]+\]/g, " ")
+      .replace(/[“”"'.…,;:!?—–-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const words = cleanText ? cleanText.split(/\s+/).filter(Boolean) : [];
+    const wordCount = words.length;
+
+    const estimatedSeconds =
+      wordCount / config.durationWordsPerSecond +
+      pauseCount * config.durationPauseSeconds +
+      sighCount * config.durationSighSeconds;
+
+    let duration = longDuration;
+
+    if (estimatedSeconds <= config.durationShortMax) {
+      duration = shortDuration;
+    } else if (estimatedSeconds <= config.durationNormalMax) {
+      duration = normalDuration;
+    }
+
+    return {
+      duration,
+      estimatedSeconds,
+      wordCount,
+      pauseCount,
+      sighCount,
+    };
+  }
+
+  function parseDurationValues(value) {
+    return String(value || "3,5,8")
+      .split(",")
+      .map((part) => Number(part.trim()))
+      .filter((number) => Number.isFinite(number) && number > 0);
+  }
+
+  async function setDurationValue(durationSeconds) {
+    const input = selectors.durationInput();
+
+    if (!input) {
+      log("Duration input not found. Continuing without setting duration.");
+      return false;
+    }
+
+    const duration = Number(durationSeconds);
+    const candidates = [
+      `${duration} seconds`,
+      `${duration} second`,
+      `${duration}s`,
+      `${duration} sec`,
+      `${duration}`,
+    ];
+
+    input.scrollIntoView({
+      behavior: "instant",
+      block: "center",
+      inline: "center",
+    });
+
+    hardClick(input);
+    await sleep(350);
+
+    const option = findVisibleOptionByTextAny(candidates);
+
+    if (option) {
+      hardClick(option);
+      await sleep(400);
+      log(
+        `Duration option clicked: ${option.innerText || option.textContent || duration}`,
+      );
+      return true;
+    }
+
+    setNativeValue(input, String(duration));
+    await sleep(250);
+
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    input.dispatchEvent(
+      new KeyboardEvent("keyup", {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    await sleep(500);
+    log(`Duration value set by typing: ${duration}`);
+    return true;
+  }
+
+  function findVisibleOptionByTextAny(texts) {
+    const normalizedTargets = texts.map((text) =>
+      String(text || "")
+        .trim()
+        .toLowerCase(),
+    );
+
+    const candidates = [
+      ...document.querySelectorAll(
+        '[role="option"], [data-testid="dropdown-option"], li, div, span, button',
+      ),
+    ].filter((el) => !isInsidePanel(el));
+
+    return candidates.find((el) => {
+      const rect = el.getBoundingClientRect();
+      const visible = rect.width > 0 && rect.height > 0;
+      const content = (el.innerText || el.textContent || "")
+        .trim()
+        .toLowerCase();
+
+      if (!visible || !content) return false;
+
+      return normalizedTargets.some(
+        (target) => content === target || content.includes(target),
+      );
+    });
+  }
+
+  function getImageSlotForItemIndex(zeroBasedIndex, imageCount) {
+    return (zeroBasedIndex % imageCount) + 1;
+  }
+
+  function buildPrompt({ visual, speech, sound }) {
+    return `[VISUAL]
+${visual}
+
+[SPEECH]
+${speech}
+
+[SOUND]
+${sound}`;
+  }
+
+  async function setSeedValue(seedValue) {
+    const input = selectors.seedInput();
+
+    if (!input) {
+      log("Seed input not found. Continuing without setting seed.");
+      return false;
+    }
+
+    const normalizedSeed = String(seedValue ?? "").trim();
+
+    if (!normalizedSeed) {
+      log("Default seed is empty. Seed input was not touched.");
+      return false;
+    }
+
+    setNativeValue(input, normalizedSeed);
+    log(`Default seed set once before first generation: ${normalizedSeed}`);
+    await sleep(300);
+    return true;
+  }
+
+  async function setAspectRatio(targetValue) {
+    const input = selectors.aspectRatioInput();
+
+    if (!input) {
+      log("Aspect ratio input not found. Continuing without forcing 9:16.");
+      return false;
+    }
+
+    const target = String(targetValue || DEFAULT_ASPECT_RATIO).trim();
+
+    input.scrollIntoView({
+      behavior: "instant",
+      block: "center",
+      inline: "center",
+    });
+
+    hardClick(input);
+    await sleep(400);
+
+    setNativeValue(input, target);
+    await sleep(400);
+
+    const option = findVisibleOptionByText(target);
+
+    if (option) {
+      hardClick(option);
+      log(
+        `Aspect ratio option clicked once before first generation: ${target}`,
+      );
+      await sleep(500);
+      return true;
+    }
+
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    input.dispatchEvent(
+      new KeyboardEvent("keyup", {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    log(`Aspect ratio value set once before first generation: ${target}`);
+    await sleep(700);
+    return true;
+  }
+
+  function findVisibleOptionByText(text) {
+    const target = String(text || "")
+      .trim()
+      .toLowerCase();
+
+    const candidates = [
+      ...document.querySelectorAll(
+        '[role="option"], [data-testid="dropdown-option"], li, div, span, button',
+      ),
+    ].filter((el) => !isInsidePanel(el));
+
+    return candidates.find((el) => {
+      const rect = el.getBoundingClientRect();
+      const visible = rect.width > 0 && rect.height > 0;
+      const content = (el.innerText || el.textContent || "")
+        .trim()
+        .toLowerCase();
+
+      return visible && content === target;
+    });
   }
 
   function setPrompt(value) {
@@ -800,21 +1801,21 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     element.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  async function clearGradioAudioInput() {
-    const clearButton = selectors.audioClearButton();
+  async function clearGradioImageInput() {
+    const clearButton = selectors.imageClearButton();
 
     if (clearButton) {
       hardClick(clearButton);
-      log("Clicked Gradio audio clear button inside #component-7.");
-      await sleep(1600);
+      log("Clicked Gradio image clear button inside #component-6.");
+      await sleep(1200);
     } else {
-      log("Gradio audio clear button not found inside #component-7.");
+      log("Gradio image clear button not found. Continuing.");
     }
 
-    const input = await waitForGradioAudioInput(10000);
+    const input = await waitForGradioImageInput(10000);
 
     if (!input) {
-      log("Audio upload input did not reappear after clear.");
+      log("Image upload input did not reappear after clear.");
       return;
     }
 
@@ -822,7 +1823,123 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
       input.value = "";
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
-      log("Audio input is ready for next upload.");
+      log("Image input is ready for next upload.");
+    } catch (error) {
+      log(`Manual image input clear skipped: ${error.message}`);
+    }
+
+    await sleep(500);
+  }
+
+  async function uploadImageFile(file) {
+    if (!file) {
+      throw new Error("Missing File object for image");
+    }
+
+    const input = await waitForGradioImageInput(12000);
+
+    if (!input) {
+      throw new Error("Image input not found after clearing previous image");
+    }
+
+    if (input.id === "glsr-global-image-files" || isInsidePanel(input)) {
+      throw new Error("Refusing to upload into extension panel image input");
+    }
+
+    const dt = new DataTransfer();
+    dt.items.add(file);
+
+    input.files = dt.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+
+    log(`Uploaded image into Gradio: ${file.name}`);
+  }
+
+  async function waitForGradioImageInput(timeoutMs = 10000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      const input = selectors.imageInput();
+
+      if (
+        input &&
+        input.id !== "glsr-global-image-files" &&
+        !isInsidePanel(input)
+      ) {
+        return input;
+      }
+
+      await sleep(300);
+    }
+
+    return null;
+  }
+
+  async function waitForImageToBeReady(expectedFileName, timeoutMs = 30000) {
+    const started = Date.now();
+    let lastLogAt = 0;
+
+    while (Date.now() - started < timeoutMs) {
+      const block = selectors.imageBlock();
+      const generateButton = selectors.generateButton();
+
+      const hasPreview =
+        !!block?.querySelector("img") ||
+        !!block?.querySelector("canvas") ||
+        !!selectors.imageClearButton();
+
+      const buttonReady =
+        generateButton &&
+        !generateButton.disabled &&
+        generateButton.getAttribute("aria-disabled") !== "true";
+
+      if (hasPreview && buttonReady) {
+        log(`Image appears ready: ${expectedFileName}`);
+        await sleep(800);
+        return true;
+      }
+
+      if (Date.now() - lastLogAt > 3000) {
+        lastLogAt = Date.now();
+        log(
+          `Waiting for image to finish loading... preview=${hasPreview}, generateReady=${buttonReady}`,
+        );
+      }
+
+      await sleep(400);
+    }
+
+    throw new Error(
+      `Image did not become ready after upload: ${expectedFileName}`,
+    );
+  }
+
+  async function clearGradioAudioInput() {
+    const clearButton = selectors.audioClearButton();
+
+    if (clearButton) {
+      hardClick(clearButton);
+      log("Clicked Gradio audio clear button inside #component-7.");
+      await sleep(1400);
+    } else {
+      log("Gradio audio clear button not found inside #component-7.");
+    }
+
+    const input = await waitForGradioAudioInput(10000);
+
+    if (!input) {
+      log(
+        "Audio upload input did not reappear after clear. This is okay if no audio is needed.",
+      );
+      return;
+    }
+
+    try {
+      input.value = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      log("Audio input is ready for optional next upload.");
     } catch (error) {
       log(`Manual audio input clear skipped: ${error.message}`);
     }
@@ -841,7 +1958,7 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
       throw new Error("Audio input not found after clearing previous audio");
     }
 
-    if (input.id === "glsr-audio-files" || isInsideRunnerPanel(input)) {
+    if (input.id === "glsr-batch-audio-files" || isInsidePanel(input)) {
       throw new Error("Refusing to upload into extension panel audio input");
     }
 
@@ -863,8 +1980,8 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
 
       if (
         input &&
-        input.id !== "glsr-audio-files" &&
-        !isInsideRunnerPanel(input)
+        input.id !== "glsr-batch-audio-files" &&
+        !isInsidePanel(input)
       ) {
         return input;
       }
@@ -918,6 +2035,29 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     throw new Error(
       `Audio did not become ready after upload: ${expectedFileName}`,
     );
+  }
+
+  async function waitForGenerateButtonReady(timeoutMs = 15000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      const button = selectors.generateButton();
+
+      const ready =
+        button &&
+        !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true";
+
+      if (ready) {
+        log("Generate button is ready.");
+        await sleep(500);
+        return true;
+      }
+
+      await sleep(300);
+    }
+
+    throw new Error("Generate button did not become ready");
   }
 
   async function clickGenerateButton() {
@@ -1022,34 +2162,66 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     }
 
     throw new Error(
-      `Timed out after ${Math.round(
-        timeoutMs / 60000,
-      )} minutes waiting for new MP4`,
+      `Timed out after ${Math.round(timeoutMs / 60000)} minutes waiting for new MP4`,
     );
   }
 
   function getCurrentOutputHref() {
     const link = selectors.downloadLink();
-
-    if (link?.href) {
-      return link.href;
-    }
+    if (link?.href) return link.href;
 
     const video = selectors.outputVideo();
-
-    if (video?.src) {
-      return video.src;
-    }
+    if (video?.src) return video.src;
 
     return "";
   }
 
-  function makeFilename(index, audioName) {
-    const base = audioName.replace(/\.[^.]+$/, "");
+  function findImageFileForSlot(slotNumber, filesMap) {
+    const numbered = findNumberedFile(slotNumber, filesMap);
+    if (numbered) return numbered;
 
-    return `gradio-ltx/${String(index).padStart(3, "0")}_${sanitizeFilename(
-      base,
-    )}.mp4`;
+    const sorted = getSortedFilesBySlot(filesMap);
+    return sorted[slotNumber - 1] || null;
+  }
+
+  function getSortedFilesBySlot(filesMap) {
+    return [...filesMap.values()].sort((a, b) => {
+      const aNumber = extractLeadingNumber(a.name);
+      const bNumber = extractLeadingNumber(b.name);
+
+      if (Number.isFinite(aNumber) && Number.isFinite(bNumber)) {
+        return aNumber - bNumber;
+      }
+
+      if (Number.isFinite(aNumber)) return -1;
+      if (Number.isFinite(bNumber)) return 1;
+
+      return String(a.name).localeCompare(String(b.name));
+    });
+  }
+
+  function findNumberedFile(number, filesMap) {
+    const files = [...filesMap.values()];
+
+    const exactPrefixRegex = new RegExp(
+      `^${escapeRegExp(String(number))}(?:[.\\s_-]|$)`,
+      "i",
+    );
+
+    return files.find((file) => exactPrefixRegex.test(file.name)) || null;
+  }
+
+  function makeFilename({
+    batchIndex,
+    batchName,
+    itemIndex,
+    imageSlot,
+    audioName,
+  }) {
+    const safeBatch = sanitizeFilename(batchName || `batch-${batchIndex}`);
+    const safeAudio = sanitizeFilename(audioName || `item-${itemIndex}`);
+
+    return `gradio-ltx/${String(batchIndex).padStart(2, "0")}_${safeBatch}/${String(itemIndex).padStart(3, "0")}_global-image-${imageSlot}_${safeAudio}.mp4`;
   }
 
   function sanitizeFilename(text) {
@@ -1070,33 +2242,84 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     }
   }
 
-  function updateFileCount() {
-    const count = state.selectedFiles.size;
+  function updateFileCounts() {
+    $("glsr-global-image-count").textContent = state.globalImages.size
+      ? `${state.globalImages.size} global image file(s) selected`
+      : "No image files selected";
 
-    $("glsr-file-count").textContent = count
-      ? `${count} audio file(s) selected`
+    $("glsr-batch-audio-count").textContent = state.batchAudios.size
+      ? `${state.batchAudios.size} optional audio file(s) selected`
       : "No audio files selected";
   }
 
-  function logSelectedAudioMapping() {
-    const files = [...state.selectedFiles.values()]
+  function logGlobalImageMapping() {
+    const files = getSortedFilesBySlot(state.globalImages).map(
+      (file) => file.name,
+    );
+
+    if (!files.length) return;
+
+    log("Global image files:");
+    files.forEach((fileName, index) => {
+      const number = extractLeadingNumber(fileName);
+      log(
+        `  slot ${Number.isFinite(number) ? number : index + 1} → ${fileName}`,
+      );
+    });
+  }
+
+  function logAudioMapping(filesMap) {
+    const files = [...filesMap.values()]
       .map((file) => file.name)
       .sort((a, b) => extractLeadingNumber(a) - extractLeadingNumber(b));
 
     if (!files.length) return;
 
-    log("Selected audio files currently in memory:");
-
+    log("Selected optional audio files:");
     for (const fileName of files) {
       const number = extractLeadingNumber(fileName);
-
       log(`  ${Number.isFinite(number) ? number : "?"} → ${fileName}`);
     }
   }
 
+  function logGlobalAssetCoverage(assets) {
+    log("Global asset coverage:");
+
+    for (let i = 0; i < assets.images.size; i++) {
+      const slot = i + 1;
+      const image = findImageFileForSlot(slot, assets.images);
+      const visual = assets.visualPrompts[i];
+
+      log(
+        `  image ${slot}: ${image?.name || "MISSING"} | visual=${truncate(visual || "MISSING", 80)}`,
+      );
+    }
+  }
+
+  function logBatchCoverage(assets, draft) {
+    log("Batch coverage:");
+
+    for (const item of draft.items) {
+      const itemNumber = item.index + 1;
+      const imageSlot = getImageSlotForItemIndex(
+        item.index,
+        assets.images.size,
+      );
+      const image = findImageFileForSlot(imageSlot, assets.images);
+      const audio = findNumberedFile(itemNumber, draft.audios);
+
+      log(
+        `  item ${itemNumber}: global image ${imageSlot}=${image?.name || "MISSING"} | audio=${audio?.name || "NO AUDIO"}`,
+      );
+    }
+  }
+
+  function getImageSlotForItemIndex(zeroBasedIndex, imageCount) {
+    return (zeroBasedIndex % imageCount) + 1;
+  }
+
   function extractLeadingNumber(fileName) {
     const match = String(fileName || "").match(/^(\d+)(?:[.\s_-]|$)/);
-
     return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
   }
 
@@ -1111,7 +2334,7 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     const line = `[${new Date().toLocaleTimeString()}] ${text}`;
 
     state.logLines.push(line);
-    state.logLines = state.logLines.slice(-280);
+    state.logLines = state.logLines.slice(-700);
 
     $("glsr-log").textContent = state.logLines.join("\n");
   }
@@ -1124,8 +2347,21 @@ CLIP 3 — "Você vai sentir uma energia diferente nesta semana... [pause] mais 
     return text.length > max ? `${text.slice(0, max - 1)}…` : text;
   }
 
+  function escapeHtml(text) {
+    return String(text || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
   function escapeRegExp(value) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function createId() {
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

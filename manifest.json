@@ -3,7 +3,7 @@
   "name": "Gradio LTX Speech Runner",
   "description": "Runs speech/audio variants on a Gradio LTX audio-to-video interface, downloads each generated MP4, then continues.",
   "version": "0.2.0",
-  "permissions": ["downloads", "storage", "activeTab", "scripting"],
+  "permissions": ["downloads", "storage", "activeTab", "scripting", "tabs"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "Gradio LTX Speech Runner",
