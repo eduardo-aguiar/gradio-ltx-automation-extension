@@ -1901,7 +1901,14 @@ IMAGE 3 — "Vertical 9:16 realistic cinematic close-up of tarot cards, crystals
   }
 
   async function maybeSetAutoDuration({ speech, hasAudio, config, overrideDuration }) {
-    if (!config.autoDuration && !overrideDuration) {
+    // Always prioritize explicit CLIP duration override
+    if (overrideDuration) {
+      log(`Using custom duration from CLIP marker: ${overrideDuration}s.`);
+      await setDurationValue(overrideDuration);
+      return;
+    }
+
+    if (!config.autoDuration) {
       log("Auto duration disabled. Duration was not touched.");
       return;
     }
@@ -1910,14 +1917,6 @@ IMAGE 3 — "Vertical 9:16 realistic cinematic close-up of tarot cards, crystals
       log(
         "Audio exists and match-audio is enabled. Duration is ignored by Gradio, so duration was not touched.",
       );
-      return;
-    }
-
-    let durationToUse = overrideDuration;
-
-    if (overrideDuration) {
-      log(`Using custom duration from CLIP marker: ${overrideDuration}s.`);
-      await setDurationValue(durationToUse);
       return;
     }
 
@@ -2001,13 +2000,6 @@ IMAGE 3 — "Vertical 9:16 realistic cinematic close-up of tarot cards, crystals
     }
 
     const duration = Number(durationSeconds);
-    const candidates = [
-      `${duration} seconds`,
-      `${duration} second`,
-      `${duration}s`,
-      `${duration} sec`,
-      `${duration}`,
-    ];
 
     input.scrollIntoView({
       behavior: "instant",
@@ -2015,24 +2007,46 @@ IMAGE 3 — "Vertical 9:16 realistic cinematic close-up of tarot cards, crystals
       inline: "center",
     });
 
+    // Step 1: Open the dropdown
     hardClick(input);
-    await sleep(350);
+    await sleep(400);
 
-    const option = findVisibleOptionByTextAny(candidates);
+    // Step 2: Filter dropdown so only the target option is visible.
+    // Gradio filterable dropdowns need setNativeValue to populate the options list —
+    // hardClick alone does not cause Gradio to render [role="option"] elements into the DOM.
+    const filterText = `${duration} Seconds`;
+    setNativeValue(input, filterText);
+    await sleep(400);
+
+    // Step 3: Find the now-visible option by aria-label.
+    // Safe because we only search [role="option"] / [data-testid="dropdown-option"] —
+    // never generic div/span — so it cannot accidentally match the page body.
+    const findDurationOption = () =>
+      [...document.querySelectorAll('[data-testid="dropdown-option"], [role="option"]')]
+        .filter((el) => !isInsidePanel(el))
+        .find((el) => {
+          const label = (el.getAttribute("aria-label") || "").toLowerCase();
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 && label.startsWith(`${duration} `);
+        });
+
+    let option = findDurationOption();
+
+    // Allow up to 3 extra ticks if the DOM hasn't updated yet after filtering
+    for (let i = 0; i < 3 && !option; i++) {
+      await sleep(150);
+      option = findDurationOption();
+    }
 
     if (option) {
       hardClick(option);
       await sleep(400);
-      log(
-        `Duration option clicked: ${
-          option.innerText || option.textContent || duration
-        }`,
-      );
+      log(`Duration set to ${duration}s (option: ${option.getAttribute("aria-label") || duration})`);
       return true;
     }
 
-    setNativeValue(input, String(duration));
-    await sleep(250);
+    // Fallback: press Enter to confirm whatever Gradio has filtered to
+    log(`Duration option for ${duration}s not found after filtering. Pressing Enter as fallback.`);
 
     input.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -2053,7 +2067,7 @@ IMAGE 3 — "Vertical 9:16 realistic cinematic close-up of tarot cards, crystals
     );
 
     await sleep(500);
-    log(`Duration value set by typing: ${duration}`);
+    log(`Duration fallback: typed "${filterText}" and pressed Enter.`);
     return true;
   }
 
